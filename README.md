@@ -1,4 +1,4 @@
-# RV32I Single-Cycle CPU
+# RISC-V 32 Single-Cycle CPU
 
 A fully functional RISC-V RV32I single-cycle CPU, originally designed in Logisim Evolution and converted to Verilog for simulation and eventual FPGA deployment on an Intel Altera Cyclone V.
 
