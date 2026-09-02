@@ -1,7 +1,44 @@
-# RISC-V 32 Single-Cycle CPU
+# RV32I CPU — Single-Cycle & Pipelined Implementations
 
-A fully functional RISC-V RV32I single-cycle CPU, originally designed in Logisim Evolution and converted to Verilog for simulation and eventual FPGA deployment on an Intel Altera Cyclone V.
+A RISC-V RV32I CPU implemented two ways: a single-cycle design and a 5-stage pipelined design with hazard detection and forwarding. Both were originally prototyped in Logisim Evolution and converted to Verilog for simulation and eventual FPGA deployment on an Altera Max 10 FPGA.
 
+---
+
+## Repository Structure
+
+```
+Verilog/
+├── Single-Cycle/
+│   ├── alu.v
+│   ├── decode.v
+│   ├── regfile.v
+│   ├── pc_control.v
+│   ├── imem.v
+│   ├── dmem.v
+│   └── cpu.v
+├── Pipelined/
+│   ├── alu.v
+│   ├── decode.v
+│   ├── regfile.v
+│   ├── pc_control.v
+│   ├── imem.v
+│   ├── dmem.v
+│   ├── jump_calc.v
+│   ├── forwarding_unit.v
+│   ├── hazard.v
+│   ├── if_id_reg.v
+│   ├── id_ex_reg.v
+│   ├── ex_mem_reg.v
+│   ├── mem_wb_reg.v
+│   ├── cpu_pipelined.v
+│   └── testbenches.v
+```
+
+---
+
+# Single-Cycle CPU
+
+A fully functional RISC-V RV32I single-cycle CPU.
 
 ## Architecture Overview
 
@@ -17,30 +54,15 @@ A fully functional RISC-V RV32I single-cycle CPU, originally designed in Logisim
 
 ## Implemented Instructions
 
-| Category       | Instructions                                      | Status       |
-|----------------|---------------------------------------------------|--------------|
-| R-type ALU     | add, sub, sll, srl, sra, slt, sltu, xor, or, and | ✅ Working   |
-| I-type ALU     | addi, slti, sltiu, xori, ori, andi, slli, srli, srai | ✅ Working |
-| Loads          | lw, lh, lb, lhu, lbu                             | ✅ Working   |
-| Stores         | sw, sh, sb                                        | ✅ Working   |
-| Branches       | beq, bne, blt, bge, bltu, bgeu                   | ✅ Working   |
-| Jumps          | jal, jalr                                         | ✅ Working   |
-| Upper immediate| lui, auipc                                        | ✅ Working   |
-
----
-
-## Module Structure
-
-```
-RV32CPU/
-├── alu.v                — All ALU operations, forceADD, LUI/AUIPC
-├── decode.v             — Instruction decoder, control signal generation
-├── regfile.v            — 32×32 register file, x0 hardwired to zero
-├── pc_control.v         — PC register, branch/jump target computation, next-PC mux
-├── instruction_mem.v    — 4KB instruction ROM, combinational read
-├── data_mem.v           — 4KB data RAM, combinational read, synchronous write
-├── cpu.v                — Top-level datapath, wires all modules together
-```
+| Category        | Instructions                                         |
+| ---------------- | ----------------------------------------------------- |
+| R-type ALU       | add, sub, sll, srl, sra, slt, sltu, xor, or, and      |
+| I-type ALU       | addi, slti, sltiu, xori, ori, andi, slli, srli, srai  |
+| Loads             | lw, lh, lb, lhu, lbu                                  |
+| Stores            | sw, sh, sb                                            |
+| Branches          | beq, bne, blt, bge, bltu, bgeu                        |
+| Jumps             | jal, jalr                                             |
+| Upper immediate   | lui, auipc                                            |
 
 ---
 
@@ -111,7 +133,8 @@ Selects between ALU result, data memory output, and PC+4 return address.
 
 ### Running
 ```bash
-iverilog -o cpu.vvp alu.v decode.v regfile.v pc_control.v instruction_mem.v data_mem.v cpu.v cpu_tb.v
+cd Verilog/Single-Cycle
+iverilog -o cpu.vvp alu.v decode.v regfile.v pc_control.v imem.v dmem.v cpu.v
 vvp cpu.vvp
 ```
 
@@ -127,10 +150,93 @@ Program that adds 5 and 7 and stores the result to memory
 
 ---
 
+# Pipelined CPU
+
+A 5-stage pipelined implementation of the same RV32I core (IF → ID → EX → MEM → WB), adding hazard detection, data forwarding, and branch resolution on top of the single-cycle datapath above. Same ISA, same ALU/decoder/register-file/memory design decisions as the single-cycle version — this section covers what's new.
+
+## Architecture Overview
+
+- **Pipeline**: 5 stages — IF, ID, EX, MEM, WB
+- **Pipeline registers**: `if_id_reg`, `id_ex_reg`, `ex_mem_reg`, `mem_wb_reg`, each carrying data and control signals between stages, with independent stall/flush control
+- **Hazard handling**: load-use hazards resolved by stalling; control hazards resolved by flushing
+- **Forwarding**: EX/MEM → EX and MEM/WB → EX, resolving most RAW hazards without stalling
+- **Branch/jump resolution**: EX stage, giving a fixed 2-cycle penalty on taken branches/jumps
+
+---
+
+## Module Structure (additions over single-cycle)
+
+```
+Verilog/Pipelined/
+├── cpu_pipelined.v      — Top-level pipeline datapath, wires all stages and pipeline registers together
+├── if_id_reg.v           — IF/ID pipeline register (stall + flush-to-NOP support)
+├── id_ex_reg.v           — ID/EX pipeline register (stall + flush support)
+├── ex_mem_reg.v          — EX/MEM pipeline register
+├── mem_wb_reg.v          — MEM/WB pipeline register
+├── hazard.v              — Load-use hazard detection, drives PC/IF-ID stall and ID/EX flush
+├── forwarding_unit.v     — EX/MEM and MEM/WB forwarding into the EX stage
+├── jump_calc.v           — Branch condition evaluation, target address, and return address, resolved in EX
+├── testbenches.v         — Standalone unit tests for the ALU and register file
+```
+
+---
+
+## Key Design Decisions
+
+### Hazard Detection Unit
+- Detects the classic **load-use hazard**: a `lw`-family instruction sitting in EX writes a register that the instruction currently in ID needs to read
+- `uses_rs1` is false for instructions that don't actually read `rs1` (LUI, AUIPC, JAL)
+- `uses_rs2` is only true for stores, R-type ALU ops, and branches — the only instruction classes that read a second source register
+- On a detected hazard: stalls the PC and the IF/ID register (holding their current values for one cycle) and flushes the ID/EX register (inserting a one-cycle bubble)
+
+### Forwarding Unit
+- Two forwarding paths feed the EX stage: **EX/MEM → EX** and **MEM/WB → EX**
+- EX/MEM forwarding takes priority over MEM/WB when both would apply, since the EX/MEM result is younger
+- EX/MEM forwarding only carries ALU results and JAL/JALR return addresses — **not** load data, since a load's value isn't available until the MEM stage completes. This is exactly why the hazard unit above still needs to stall on load-use, rather than relying on forwarding alone
+- MEM/WB forwarding does include load data (`MemDout`), since by that stage the memory read has completed
+
+### Branch/Jump Resolution
+- Resolved in the EX stage by `jump_calc`, using the (possibly forwarded) operands `fwd_rs1`/`fwd_rs2`
+- On a taken branch or jump, `branch_taken_ex` flushes both IF/ID and ID/EX, squashing the two instructions fetched from the wrong path — a fixed 2-cycle branch penalty
+- The PC updates directly to `target_pc_ex` the cycle after resolution
+
+### Pipeline Registers
+- Each register (`if_id_reg`, `id_ex_reg`, `ex_mem_reg`, `mem_wb_reg`) carries both datapath values and control signals downstream
+- `if_id_reg` and `id_ex_reg` support independent **stall** (hold current contents) and **flush** (clear to a bubble) inputs
+- On flush, `if_id_reg` inserts the NOP encoding `32'h00000013` (`addi x0, x0, 0`) directly as the bubble instruction
+- On flush, `id_ex_reg` zeroes all control signals (`wen1`, `MemStore`, `MemLoad`, `isBranch`, `isJAL`, `isJALR`) so the bubble has no effect on architectural state as it moves through EX/MEM/WB
+
+### Register File / Writeback
+- Same combinational-read, synchronous-write design as the single-cycle version, now reading in ID and writing in WB
+- RAW hazards between an in-flight instruction and a same-cycle ID-stage read are resolved by the forwarding unit rather than by the register file itself
+
+---
+
+## Simulation
+
+### Requirements
+- [Icarus Verilog](http://bleyer.org/icarus/) (Windows) or `sudo apt install iverilog` (Linux)
+- GTKWave (bundled with Icarus on Windows)
+
+### Running
+The pipeline testbench (`cpu_pipelined_tb`) is defined inside `cpu_pipelined.v` itself:
+```bash
+cd Verilog/Pipelined
+iverilog -o cpu_pipelined.vvp alu.v decode.v regfile.v pc_control.v imem.v dmem.v jump_calc.v forwarding_unit.v hazard.v if_id_reg.v id_ex_reg.v ex_mem_reg.v mem_wb_reg.v cpu_pipelined.v
+vvp cpu_pipelined.vvp
+```
+This strobes pipeline state every cycle and dumps final register/memory contents to `cpu_test.vcd`, viewable in GTKWave.
+
+### Program format
+Same as the single-cycle version — programs are loaded via `program.hex`, one 32-bit instruction per line in hex.
+
+---
+
 ## Planned Future Work
 
-- [ ] Pipelined version (5-stage: IF, ID, EX, MEM, WB) with hazard detection and forwarding
 - [ ] Memory-mapped I/O version with VRAM and peripheral support
-- [ ] FPGA deployment on Intel Altera Cyclone V via Quartus Prime
+- [ ] FPGA deployment on Altera Max 10 via Quartus Prime
 - [ ] Byte-enable support on data memory for Quartus BRAM inference
 - [ ] UART peripheral for serial output
+- [ ] Dedicated hazard-heavy assembly test programs exercising back-to-back load-use stalls and taken-branch flushes
+- [ ] Pong Demo
